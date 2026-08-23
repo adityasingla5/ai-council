@@ -1,6 +1,14 @@
 import { describe, expect, it } from "vitest";
 import { applyEvalEvent, emptyLiveEvalState } from "@/components/eval-dashboard/read-eval-stream";
-import { canResumeEval, evalNoticeClass, formatEvalStatus } from "@/components/eval-dashboard/eval-status";
+import {
+  canResumeEval,
+  evalNoticeClass,
+  formatCorrelatedFailureNotice,
+  formatEvalStatus,
+  formatIndependence,
+  itemFailureMetrics
+} from "@/components/eval-dashboard/eval-status";
+import { measureCorrelatedFailure, memberHeldOutScore } from "@/lib/evals/correlation";
 
 describe("eval status labels", () => {
   it("shows scored progress for partial runs", () => {
@@ -43,5 +51,52 @@ describe("live eval events", () => {
 
     expect(scored.completed).toBe(1);
     expect(scored.scores.map((score) => score.itemIndex)).toEqual([2]);
+  });
+
+  it("keeps correlated-failure measurements on scored items", () => {
+    const correlatedFailure = measureCorrelatedFailure({
+      memberScores: [
+        memberHeldOutScore("model-a", 20, "Missed"),
+        memberHeldOutScore("model-b", 22, "Missed")
+      ],
+      memberAnswers: [
+        { modelId: "model-a", content: "Same wrong framing for the council." },
+        { modelId: "model-b", content: "Same wrong framing for the council." }
+      ],
+      hiddenScore: 21,
+      rubricScore: 80
+    });
+    const scored = applyEvalEvent(emptyLiveEvalState, {
+      type: "item_scored",
+      evalRunId: "eval-1",
+      itemIndex: 0,
+      total: 1,
+      prompt: "Q",
+      score: 80,
+      rationale: "Fluent",
+      finalAnswer: "A",
+      hiddenScore: 21,
+      correlatedFailure
+    });
+
+    expect(scored.scores[0]?.hiddenScore).toBe(21);
+    expect(scored.scores[0]?.correlatedFailure?.independence).toBe("correlated");
+    expect(itemFailureMetrics(correlatedFailure).some((metric) => metric.label === "Correlated failure")).toBe(true);
+    expect(formatIndependence("correlated")).toBe("Correlated");
+    expect(formatCorrelatedFailureNotice({
+      items: 1,
+      meanRubricScore: 80,
+      meanHiddenScore: 21,
+      meanAnswerAgreement: 1,
+      meanCoFailureRate: 1,
+      meanExpectedCoFailureRate: 1,
+      meanExcessCoFailure: 0,
+      meanConsensusTrap: 0.79,
+      meanCorrelatedFailure: 1,
+      meanFramingGap: 59,
+      allFailedItems: 1,
+      correlatedItems: 1,
+      independence: "correlated"
+    })).toMatch(/correlated failure 1\.00/i);
   });
 });

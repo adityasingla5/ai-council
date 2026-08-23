@@ -668,7 +668,7 @@ details.trace summary > span:first-child {
   gap: 12px;
 }
 
-.eval-score-list li {
+.eval-score-list > li {
   display: grid;
   gap: 4px;
   padding: 10px 12px;
@@ -677,7 +677,7 @@ details.trace summary > span:first-child {
   background: var(--surface-soft);
 }
 
-.eval-score-list strong {
+.eval-score-list > li > strong {
   color: var(--blue);
 }
 
@@ -703,5 +703,69 @@ details.trace summary > span:first-child {
   font: inherit;
   font-size: 13px;
   line-height: 1.45;
+}
+
+.eval-audit {
+  display: grid;
+  gap: 8px;
+  margin-top: 8px;
+}
+
+.eval-metric-grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(140px, 1fr));
+  gap: 8px;
+  margin: 0;
+}
+
+.eval-metric {
+  display: grid;
+  gap: 2px;
+  padding: 8px 10px;
+  border: 1px solid var(--line);
+  border-radius: 8px;
+  background: var(--surface);
+}
+
+.eval-metric dt {
+  font-size: 11px;
+  color: var(--muted);
+}
+
+.eval-metric dd {
+  margin: 0;
+  font-size: 15px;
+  font-weight: 650;
+}
+
+.eval-metric.warn dd {
+  color: var(--amber);
+}
+
+.eval-flag {
+  margin: 0;
+  color: var(--amber);
+  font-size: 13px;
+}
+
+.eval-member-scores {
+  list-style: none;
+  margin: 0;
+  padding: 0;
+  display: grid;
+  gap: 8px;
+}
+
+.eval-member-scores li {
+  display: grid;
+  gap: 2px;
+  padding: 8px 10px;
+  border: 1px dashed var(--line);
+  border-radius: 8px;
+  background: var(--surface);
+}
+
+.eval-member-scores strong {
+  color: var(--ink);
 }
 

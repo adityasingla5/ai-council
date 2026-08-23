@@ -17,6 +17,7 @@ import {
   type OperationLease
 } from "@/lib/production-guardrails";
 import { assertTrustedOrigin, requireIdempotencyKey } from "@/lib/request-security";
+import { evalModelIds } from "@/lib/evals/input";
 import { parseEvalRequest } from "@/lib/validation";
 
 export const runtime = "nodejs";
@@ -40,7 +41,7 @@ export async function POST(request: Request) {
     const parsed = parseEvalRequest(await parseJsonBody(request));
     const idempotencyKey = requireIdempotencyKey(request);
     if (parsed.kind === "create") {
-      assertAllowedModels([...parsed.input.models, parsed.input.judgeModel]);
+      assertAllowedModels(evalModelIds(parsed.input));
       assertResearchAvailable(parsed.input.researchEnabled);
     } else {
       const resume = await loadEvalRunForResume({
@@ -48,7 +49,7 @@ export async function POST(request: Request) {
         userId: profile.id,
         evalRunId: parsed.evalRunId
       });
-      assertAllowedModels([...resume.input.models, resume.input.judgeModel]);
+      assertAllowedModels(evalModelIds(resume.input));
       assertResearchAvailable(resume.input.researchEnabled);
     }
     await enforceRateLimit({

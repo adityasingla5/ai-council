@@ -3,10 +3,16 @@
 import { useDeferredValue, useEffect, useMemo, useRef, useState } from "react";
 import { Beaker, ChevronDown, ChevronRight, Play, Search, Square } from "lucide-react";
 import {
+  aggregateFailureMetrics,
   canResumeEval,
   evalItemCount,
   evalNoticeClass,
-  formatEvalStatus
+  formatCorrelatedFailureNotice,
+  formatEvalStatus,
+  formatIndependence,
+  formatRatio,
+  itemFailureMetrics,
+  type EvalMetric
 } from "@/components/eval-dashboard/eval-status";
 import {
   applyEvalEvent,
@@ -16,6 +22,13 @@ import {
 } from "@/components/eval-dashboard/read-eval-stream";
 import { isAbortError, readResponseError } from "@/components/council-workspace/request-utils";
 import { requestJson } from "@/lib/client-api";
+import {
+  parseAggregateCorrelatedFailure,
+  parseItemCorrelatedFailure,
+  parseMemberHeldOutScores,
+  type ItemCorrelatedFailure,
+  type MemberHeldOutScore
+} from "@/lib/evals/correlation";
 import type { EvalEvent } from "@/lib/evals/events";
 import { compactText } from "@/lib/format";
 import { MAX_COUNCIL_DEBATE_ROUNDS } from "@/lib/limits";
@@ -27,6 +40,11 @@ type EvalScore = {
   prompt: string;
   rationale: string | null;
   final_answer?: string | null;
+  hidden_score?: number | null;
+  adversarial_rationale?: string | null;
+  reviewer_model?: string | null;
+  member_scores?: unknown;
+  correlated_failure?: unknown;
 };
 
 type EvalRun = {
@@ -35,13 +53,21 @@ type EvalRun = {
   aggregate_score: number | null;
   created_at: string;
   baseline_label: string | null;
+  correlated_failure?: unknown;
   council_config?: {
     models?: string[];
     judgeModel?: string;
+    reviewerModel?: string;
     debateDepth?: number;
     researchEnabled?: boolean;
   } | null;
-  eval_sets?: { name?: string; rubric?: string; description?: string | null; items?: unknown } | null;
+  eval_sets?: {
+    name?: string;
+    rubric?: string;
+    hidden_criteria?: string | null;
+    description?: string | null;
+    items?: unknown;
+  } | null;
   eval_scores?: EvalScore[];
 };
 
@@ -54,9 +80,11 @@ export function EvalDashboard() {
   const [description, setDescription] = useState("");
   const [baselineLabel, setBaselineLabel] = useState("");
   const [rubric, setRubric] = useState("Score for factuality, completeness, reasoning quality, and clarity.");
+  const [hiddenCriteria, setHiddenCriteria] = useState("");
   const [items, setItems] = useState("Explain the tradeoffs of using multiple LLMs for one decision.");
   const [selectedModels, setSelectedModels] = useState<string[]>([]);
   const [judgeModel, setJudgeModel] = useState("");
+  const [reviewerModel, setReviewerModel] = useState("");
   const [debateDepth, setDebateDepth] = useState(1);
   const [researchEnabled, setResearchEnabled] = useState(false);
   const [researchAvailable, setResearchAvailable] = useState(false);
@@ -93,6 +121,7 @@ export function EvalDashboard() {
           current.length ? current : modelsBody.models.slice(0, 3).map((model) => model.id)
         ));
         setJudgeModel((current) => current || modelsBody.models[0]?.id || "");
+        setReviewerModel((current) => current || modelsBody.models[1]?.id || modelsBody.models[0]?.id || "");
         setEvals(evalsBody.evals);
       })
       .catch((loadError: unknown) => {
@@ -133,9 +162,11 @@ export function EvalDashboard() {
       description: description.trim() || undefined,
       baselineLabel: baselineLabel.trim() || undefined,
       rubric,
+      hiddenCriteria: hiddenCriteria.trim() || undefined,
       items: prompts,
       models: selectedModels,
       judgeModel,
+      reviewerModel: reviewerModel || undefined,
       debateDepth,
       researchEnabled: researchEnabled && researchAvailable
     });
@@ -206,7 +237,7 @@ export function EvalDashboard() {
           <Beaker size={16} />
         </div>
         <p className="muted small">
-          Run the same prompts against a council configuration, score the answers with a rubric, and compare labeled baselines over time. Stop a long run to keep scored prompts, then resume the rest.
+          Run the same prompts against a council configuration and score the published answers with a rubric. Members&apos; independent first-pass answers are scored separately against held-out criteria the council never sees, by an adversarial reviewer that does not see debate or peer reasoning. The dashboard reports correlated failure — shared misses on the same checks — separately from answer agreement. Stop a long run to keep scored prompts, then resume the rest.
         </p>
         <div className="form-row">
           <label className="field">
@@ -228,6 +259,16 @@ export function EvalDashboard() {
             <select value={judgeModel} onChange={(event) => setJudgeModel(event.target.value)}>
               {models.map((model) => (
                 <option key={model.id} value={model.id}>
+                  {model.name}
+                </option>
+              ))}
+            </select>
+          </label>
+          <label className="field">
+            <span>Adversarial reviewer</span>
+            <select value={reviewerModel} onChange={(event) => setReviewerModel(event.target.value)}>
+              {models.map((model) => (
+                <option key={`reviewer-${model.id}`} value={model.id}>
                   {model.name}
                 </option>
               ))}
@@ -259,6 +300,17 @@ export function EvalDashboard() {
           <span>Rubric</span>
           <textarea value={rubric} onChange={(event) => setRubric(event.target.value)} />
         </label>
+        <label className="field">
+          <span>Held-out acceptance criteria</span>
+          <textarea
+            value={hiddenCriteria}
+            onChange={(event) => setHiddenCriteria(event.target.value)}
+            placeholder="Optional checks the council never sees. Prefer constraints the prompt does not already imply — required evidence, disallowed assumptions, or a different success definition."
+          />
+        </label>
+        <p className="muted small">
+          The reviewer scores first-pass member answers one at a time, without other models&apos; reasoning. Prefer a reviewer that is not the council judge.
+        </p>
         <label className="field">
           <span>Prompts, one per line</span>
           <textarea value={items} onChange={(event) => setItems(event.target.value)} />
@@ -336,6 +388,14 @@ export function EvalDashboard() {
                 <strong>{score.score.toFixed(1)}</strong>
                 <span>{score.prompt}</span>
                 {score.rationale ? <p className="muted small">{score.rationale}</p> : null}
+                <EvalItemAudit
+                  hiddenScore={score.hiddenScore}
+                  adversarialRationale={score.adversarialRationale}
+                  wrongTask={score.wrongTask}
+                  failedChecks={score.failedChecks}
+                  memberScores={score.memberScores}
+                  correlatedFailure={score.correlatedFailure}
+                />
               </li>
             ))}
           </ul>
@@ -375,9 +435,11 @@ export function EvalDashboard() {
                   const scored = (evalRun.eval_scores ?? []).length;
                   const total = evalItemCount(evalRun.eval_sets?.items);
                   const resumable = !running && canResumeEval(evalRun.status, scored, total);
+                  const runMetrics = parseAggregateCorrelatedFailure(evalRun.correlated_failure);
                   const configLabel = [
                     config?.models?.length ? `${config.models.length} models` : null,
                     config?.debateDepth != null ? `depth ${config.debateDepth}` : null,
+                    config?.reviewerModel && config.reviewerModel !== config.judgeModel ? "held-out reviewer" : null,
                     config?.researchEnabled ? "research" : null
                   ].filter(Boolean).join(" · ") || "—";
                   const scores = [...(evalRun.eval_scores ?? [])].sort(
@@ -400,7 +462,14 @@ export function EvalDashboard() {
                       <td>{evalRun.baseline_label || "—"}</td>
                       <td>{configLabel}</td>
                       <td>{formatEvalStatus(evalRun.status, scored, total)}</td>
-                      <td>{evalRun.aggregate_score?.toFixed(1) ?? "-"}</td>
+                      <td>
+                        {evalRun.aggregate_score?.toFixed(1) ?? "-"}
+                        {runMetrics ? (
+                          <div className="muted small">
+                            Correlated failure {formatRatio(runMetrics.meanCorrelatedFailure)} · {formatIndependence(runMetrics.independence)}
+                          </div>
+                        ) : null}
+                      </td>
                       <td>{new Date(evalRun.created_at).toLocaleString()}</td>
                     </tr>
                   ];
@@ -413,6 +482,13 @@ export function EvalDashboard() {
                             {evalRun.eval_sets?.rubric ? (
                               <p className="muted small"><strong>Rubric:</strong> {evalRun.eval_sets.rubric}</p>
                             ) : null}
+                            {evalRun.eval_sets?.hidden_criteria ? (
+                              <p className="muted small"><strong>Held-out criteria:</strong> {evalRun.eval_sets.hidden_criteria}</p>
+                            ) : null}
+                            {config?.reviewerModel ? (
+                              <p className="muted small"><strong>Adversarial reviewer:</strong> {config.reviewerModel}</p>
+                            ) : null}
+                            {runMetrics ? <MetricGrid metrics={aggregateFailureMetrics(runMetrics)} /> : null}
                             {resumable ? (
                               <button
                                 className="button subtle small"
@@ -429,6 +505,12 @@ export function EvalDashboard() {
                                     <strong>{score.score?.toFixed(1) ?? "—"}</strong>
                                     <span>{score.prompt}</span>
                                     {score.rationale ? <p className="muted small">{score.rationale}</p> : null}
+                                    <EvalItemAudit
+                                      hiddenScore={score.hidden_score}
+                                      adversarialRationale={score.adversarial_rationale}
+                                      memberScores={parseMemberHeldOutScores(score.member_scores)}
+                                      correlatedFailure={parseItemCorrelatedFailure(score.correlated_failure)}
+                                    />
                                     {score.final_answer ? (
                                       <details className="eval-answer-details">
                                         <summary>Council answer</summary>
@@ -469,7 +551,11 @@ function initialLiveState(body: Record<string, unknown>, evals: EvalRun[]): Live
       prompt: score.prompt,
       score: score.score ?? 0,
       rationale: score.rationale ?? "",
-      finalAnswer: score.final_answer ?? ""
+      finalAnswer: score.final_answer ?? "",
+      hiddenScore: score.hidden_score ?? undefined,
+      adversarialRationale: score.adversarial_rationale ?? undefined,
+      memberScores: parseMemberHeldOutScores(score.member_scores),
+      correlatedFailure: parseItemCorrelatedFailure(score.correlated_failure)
     }))
     .sort((left, right) => left.itemIndex - right.itemIndex);
 
@@ -494,17 +580,80 @@ function noticeForEvent(event: EvalEvent): Notice {
     return { kind: "status", text: `Scoring prompt ${event.itemIndex + 1} of ${event.total}.` };
   }
   if (event.type === "item_scored") {
-    return { kind: "status", text: `Scored prompt ${event.itemIndex + 1} of ${event.total}: ${Math.round(event.score)}.` };
+    const correlated = event.correlatedFailure
+      ? ` Correlated failure ${formatRatio(event.correlatedFailure.correlatedFailure)}.`
+      : "";
+    return {
+      kind: "status",
+      text: `Scored prompt ${event.itemIndex + 1} of ${event.total}: rubric ${Math.round(event.score)}.${correlated}`
+    };
   }
   if (event.type === "complete") {
-    return { kind: "success", text: `Eval complete. Aggregate score: ${Math.round(event.aggregateScore)}` };
+    return {
+      kind: "success",
+      text: `Eval complete. Aggregate score: ${Math.round(event.aggregateScore)}.${formatCorrelatedFailureNotice(event.correlatedFailure)}`
+    };
   }
   if (event.type === "partial") {
     const reason = event.reason === "timeout" ? "timed out" : "stopped";
     return {
       kind: "status",
-      text: `Eval ${reason} after ${event.scored} of ${event.total} prompts. Aggregate so far: ${Math.round(event.aggregateScore)}.`
+      text: `Eval ${reason} after ${event.scored} of ${event.total} prompts. Aggregate so far: ${Math.round(event.aggregateScore)}.${formatCorrelatedFailureNotice(event.correlatedFailure)}`
     };
   }
   return { kind: "error", text: event.message };
+}
+
+function MetricGrid({ metrics }: { metrics: EvalMetric[] }) {
+  if (!metrics.length) return null;
+  return (
+    <dl className="eval-metric-grid">
+      {metrics.map((metric) => (
+        <div className={metric.warn ? "eval-metric warn" : "eval-metric"} key={metric.label}>
+          <dt>{metric.label}</dt>
+          <dd>{metric.value}</dd>
+        </div>
+      ))}
+    </dl>
+  );
+}
+
+function EvalItemAudit(params: {
+  hiddenScore?: number | null;
+  adversarialRationale?: string | null;
+  wrongTask?: boolean;
+  failedChecks?: string[];
+  memberScores?: MemberHeldOutScore[];
+  correlatedFailure?: ItemCorrelatedFailure;
+}) {
+  const metrics = params.correlatedFailure ? itemFailureMetrics(params.correlatedFailure) : [];
+  const members = params.memberScores ?? [];
+  const hasHidden = params.hiddenScore != null && Number.isFinite(params.hiddenScore);
+  if (!hasHidden && !metrics.length && !members.length && !params.adversarialRationale) return null;
+
+  return (
+    <div className="eval-audit">
+      {params.wrongTask ? (
+        <p className="eval-flag">Held-out reviewer flagged a confident answer to the wrong task.</p>
+      ) : null}
+      {params.failedChecks?.length ? (
+        <p className="muted small">Failed checks: {params.failedChecks.join("; ")}</p>
+      ) : null}
+      {params.adversarialRationale && params.correlatedFailure && params.correlatedFailure.framingGap !== 0 ? (
+        <p className="muted small">{params.adversarialRationale}</p>
+      ) : null}
+      {metrics.length ? <MetricGrid metrics={metrics} /> : null}
+      {members.length ? (
+        <ul className="eval-member-scores">
+          {members.map((member) => (
+            <li key={member.modelId}>
+              <strong>{member.score.toFixed(1)}</strong>
+              <span>{member.modelId}{member.failed ? " · failed held-out" : ""}</span>
+              {member.rationale ? <p className="muted small">{member.rationale}</p> : null}
+            </li>
+          ))}
+        </ul>
+      ) : null}
+    </div>
+  );
 }

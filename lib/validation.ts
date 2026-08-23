@@ -48,12 +48,17 @@ export const evalRunSchema = z.object({
   name: z.string().trim().min(1).max(120),
   description: z.string().trim().max(2000).optional(),
   rubric: z.string().trim().min(1).max(6000),
+  hiddenCriteria: z.string().trim().max(6000).optional(),
   baselineLabel: z.string().trim().max(120).optional(),
-  items: z.array(z.object({ prompt: z.string().trim().min(1).max(6000) })).min(1).max(5),
+  items: z.array(z.object({
+    prompt: z.string().trim().min(1).max(6000),
+    hiddenCriteria: z.string().trim().max(4000).optional()
+  })).min(1).max(5),
   models: z.array(z.string().trim().min(1)).min(1).max(6).refine((models) => new Set(models).size === models.length, {
     message: "Eval models must be unique."
   }),
   judgeModel: z.string().trim().min(1),
+  reviewerModel: z.string().trim().max(200).optional(),
   debateDepth: z.number().int().min(1).max(3).default(1),
   researchEnabled: z.boolean().default(false)
 });

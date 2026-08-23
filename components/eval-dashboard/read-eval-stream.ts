@@ -90,7 +90,13 @@ export function applyEvalEvent(state: LiveEvalState, event: EvalEvent): LiveEval
         prompt: event.prompt,
         score: event.score,
         rationale: event.rationale,
-        finalAnswer: event.finalAnswer
+        finalAnswer: event.finalAnswer,
+        hiddenScore: event.hiddenScore,
+        adversarialRationale: event.adversarialRationale,
+        wrongTask: event.wrongTask,
+        failedChecks: event.failedChecks,
+        memberScores: event.memberScores,
+        correlatedFailure: event.correlatedFailure
       }
     ].sort((left, right) => left.itemIndex - right.itemIndex);
     return {

@@ -1,4 +1,6 @@
 import { ApiError } from "@/lib/api-error";
+import type { AggregateCorrelatedFailure, ItemCorrelatedFailure, MemberHeldOutScore } from "@/lib/evals/correlation";
+import { evalReviewerModel } from "@/lib/evals/input";
 import { buildEvalResumeState, type EvalResumeState } from "@/lib/evals/resume";
 import { createSupabaseAdminClient } from "@/lib/supabase/server";
 import type { EvalRunInput } from "@/lib/evals/types";
@@ -17,6 +19,7 @@ export async function createEvalRunRecords(params: {
       name: params.input.name,
       description: params.input.description ?? null,
       rubric: params.input.rubric,
+      hidden_criteria: params.input.hiddenCriteria?.trim() || null,
       items: params.input.items
     })
     .select("id")
@@ -32,6 +35,7 @@ export async function createEvalRunRecords(params: {
       council_config: {
         models: params.input.models,
         judgeModel: params.input.judgeModel,
+        reviewerModel: evalReviewerModel(params.input),
         debateDepth: params.input.debateDepth,
         researchEnabled: params.input.researchEnabled
       },
@@ -52,6 +56,11 @@ export async function persistEvalScore(params: {
   rationale: string;
   finalAnswer: string;
   judgeModel: string;
+  hiddenScore?: number;
+  adversarialRationale?: string;
+  reviewerModel?: string;
+  memberScores?: MemberHeldOutScore[];
+  correlatedFailure?: ItemCorrelatedFailure;
 }): Promise<void> {
   const { error } = await params.admin.from("eval_scores").insert({
     eval_run_id: params.evalRunId,
@@ -60,7 +69,12 @@ export async function persistEvalScore(params: {
     score: params.score,
     rationale: params.rationale,
     final_answer: params.finalAnswer,
-    judge_model: params.judgeModel
+    judge_model: params.judgeModel,
+    hidden_score: params.hiddenScore ?? null,
+    adversarial_rationale: params.adversarialRationale ?? null,
+    reviewer_model: params.reviewerModel ?? null,
+    member_scores: params.memberScores ?? [],
+    correlated_failure: params.correlatedFailure ?? {}
   });
   if (error) throw error;
 }
@@ -69,12 +83,14 @@ export async function markEvalRunComplete(params: {
   admin: EvalAdminClient;
   evalRunId: string;
   aggregateScore: number;
+  correlatedFailure?: AggregateCorrelatedFailure;
 }): Promise<void> {
   const { error } = await params.admin
     .from("eval_runs")
     .update({
       status: "complete",
       aggregate_score: params.aggregateScore,
+      correlated_failure: params.correlatedFailure ?? {},
       completed_at: new Date().toISOString()
     })
     .eq("id", params.evalRunId);
@@ -93,12 +109,14 @@ export async function markEvalRunPartial(params: {
   admin: EvalAdminClient;
   evalRunId: string;
   aggregateScore: number;
+  correlatedFailure?: AggregateCorrelatedFailure;
 }): Promise<void> {
   const { error } = await params.admin
     .from("eval_runs")
     .update({
       status: "partial",
       aggregate_score: params.aggregateScore,
+      correlated_failure: params.correlatedFailure ?? {},
       completed_at: new Date().toISOString()
     })
     .eq("id", params.evalRunId);
@@ -126,7 +144,7 @@ export async function loadEvalRunForResume(params: {
 }): Promise<EvalResumeState> {
   const { data, error } = await params.admin
     .from("eval_runs")
-    .select("id,status,baseline_label,council_config,eval_sets(name,description,rubric,items),eval_scores(item_index,score)")
+    .select("id,status,baseline_label,council_config,eval_sets(name,description,rubric,hidden_criteria,items),eval_scores(item_index,score,correlated_failure)")
     .eq("id", params.evalRunId)
     .eq("user_id", params.userId)
     .maybeSingle();
@@ -138,7 +156,7 @@ export async function loadEvalRunForResume(params: {
 export async function listEvalRunsForUser(userId: string) {
   const { data, error } = await createSupabaseAdminClient()
     .from("eval_runs")
-    .select("id,status,aggregate_score,created_at,baseline_label,council_config,eval_sets(name,rubric,description,items),eval_scores(item_index,score,prompt,rationale,final_answer)")
+    .select("id,status,aggregate_score,created_at,baseline_label,correlated_failure,council_config,eval_sets(name,rubric,hidden_criteria,description,items),eval_scores(item_index,score,prompt,rationale,final_answer,hidden_score,adversarial_rationale,reviewer_model,member_scores,correlated_failure)")
     .eq("user_id", userId)
     .order("created_at", { ascending: false })
     .limit(20);

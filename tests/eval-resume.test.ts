@@ -24,6 +24,26 @@ describe("parseEvalRequest", () => {
     expect(parsed.kind).toBe("create");
     if (parsed.kind === "create") expect(parsed.input.name).toBe("Check");
   });
+
+  it("accepts held-out criteria and a separate reviewer", () => {
+    const parsed = parseEvalRequest({
+      name: "Independence check",
+      rubric: "Be useful.",
+      hiddenCriteria: "Must not treat agreement as correctness.",
+      items: [{ prompt: "Why?", hiddenCriteria: "Name a shared framing failure." }],
+      models: ["model-a", "model-b"],
+      judgeModel: "judge-a",
+      reviewerModel: "reviewer-b",
+      debateDepth: 1,
+      researchEnabled: false
+    });
+    expect(parsed.kind).toBe("create");
+    if (parsed.kind === "create") {
+      expect(parsed.input.hiddenCriteria).toBe("Must not treat agreement as correctness.");
+      expect(parsed.input.reviewerModel).toBe("reviewer-b");
+      expect(parsed.input.items[0]?.hiddenCriteria).toBe("Name a shared framing failure.");
+    }
+  });
 });
 
 describe("eval resume state", () => {
@@ -35,21 +55,49 @@ describe("eval resume state", () => {
       council_config: {
         models: ["model-a"],
         judgeModel: "judge-a",
+        reviewerModel: "reviewer-b",
         debateDepth: 2,
         researchEnabled: false
       },
       eval_sets: {
         name: "Quality",
         rubric: "Score carefully.",
+        hidden_criteria: "Must measure correlated failure.",
         items: [{ prompt: "One" }, { prompt: "Two" }]
       },
-      eval_scores: [{ item_index: 0, score: 81 }]
+      eval_scores: [{
+        item_index: 0,
+        score: 81,
+        correlated_failure: {
+          failThreshold: 60,
+          memberCount: 2,
+          failedCount: 2,
+          failRate: 1,
+          coFailureRate: 1,
+          expectedCoFailureRate: 1,
+          excessCoFailure: 0,
+          answerAgreement: 0.9,
+          rankingAgreement: 0.8,
+          internalAgreement: 0.9,
+          hiddenScore: 20,
+          rubricScore: 81,
+          framingGap: 61,
+          consensusTrap: 0.72,
+          correlatedFailure: 0.9,
+          allFailed: true,
+          wrongTask: true,
+          independence: "correlated"
+        }
+      }]
     });
 
     expect(resume.completedIndexes).toEqual([0]);
     expect(resume.scores).toEqual([81]);
     expect(resume.input.items).toEqual([{ prompt: "One" }, { prompt: "Two" }]);
     expect(resume.input.debateDepth).toBe(2);
+    expect(resume.input.hiddenCriteria).toBe("Must measure correlated failure.");
+    expect(resume.input.reviewerModel).toBe("reviewer-b");
+    expect(resume.itemMetrics[0]?.independence).toBe("correlated");
   });
 
   it("rejects complete and still-running evals", () => {
@@ -59,6 +107,9 @@ describe("eval resume state", () => {
 
   it("reads prompt items from stored eval sets", () => {
     expect(parseEvalSetItems([{ prompt: "  Hello  " }, { prompt: "" }, "nope"])).toEqual([{ prompt: "Hello" }]);
+    expect(parseEvalSetItems([{ prompt: "Hello", hiddenCriteria: "  Hidden  " }])).toEqual([
+      { prompt: "Hello", hiddenCriteria: "Hidden" }
+    ]);
   });
 });
 
