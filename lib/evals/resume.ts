@@ -47,6 +47,16 @@ export type EvalSetItem = {
   hiddenCriteria?: string;
 };
 
+export type StoredEvalSetRecord = {
+  id: string;
+  name: string;
+  description?: string | null;
+  rubric: string;
+  hidden_criteria?: string | null;
+  items: unknown;
+  created_at?: string;
+};
+
 export function parseEvalSetItems(value: unknown): EvalSetItem[] {
   if (!Array.isArray(value)) return [];
   return value.flatMap((item) => {
@@ -126,6 +136,39 @@ export function buildEvalResumeState(row: StoredEvalResumeRow): EvalResumeState 
     completedIndexes: completed.map((score) => score.index),
     scores: completed.map((score) => score.score),
     itemMetrics
+  };
+}
+
+export function evalInputFromStoredSet(
+  set: StoredEvalSetRecord,
+  config: Pick<EvalRunInput, "models" | "judgeModel" | "reviewerModel" | "debateDepth" | "researchEnabled" | "baselineLabel">
+): EvalRunInput {
+  const items = parseEvalSetItems(set.items);
+  const name = set.name.trim();
+  const rubric = set.rubric.trim();
+  const judgeModel = config.judgeModel.trim();
+  const models = config.models.map((modelId) => modelId.trim()).filter(Boolean);
+  const hiddenCriteria = set.hidden_criteria?.trim() || "";
+  const description = set.description?.trim() || "";
+  const reviewerModel = config.reviewerModel?.trim() || "";
+
+  if (!name || !rubric || !items.length || !models.length || !judgeModel) {
+    throw new ApiError(400, "Eval configuration is incomplete.");
+  }
+
+  return {
+    evalSetId: set.id,
+    name,
+    description: description || undefined,
+    rubric,
+    hiddenCriteria: hiddenCriteria || undefined,
+    baselineLabel: config.baselineLabel,
+    items,
+    models,
+    judgeModel,
+    reviewerModel: reviewerModel || undefined,
+    debateDepth: Math.min(3, Math.max(1, config.debateDepth)),
+    researchEnabled: Boolean(config.researchEnabled)
   };
 }
 

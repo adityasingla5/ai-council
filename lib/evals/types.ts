@@ -1,9 +1,10 @@
 import type { infer as ZodInfer } from "zod";
 import type { AggregateCorrelatedFailure } from "@/lib/evals/correlation";
 import type { EvalAbortReason } from "@/lib/evals/events";
-import type { evalRunSchema } from "@/lib/validation";
+import type { evalReuseSchema, evalRunSchema } from "@/lib/validation";
 
 export type EvalRunInput = ZodInfer<typeof evalRunSchema>;
+export type EvalReuseInput = ZodInfer<typeof evalReuseSchema>;
 
 export type EvalRunResult = {
   evalRunId: string;

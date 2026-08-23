@@ -1,6 +1,6 @@
 import { describe, expect, it } from "vitest";
 import { ApiError } from "@/lib/api-error";
-import { buildEvalResumeState, parseEvalSetItems } from "@/lib/evals/resume";
+import { buildEvalResumeState, evalInputFromStoredSet, parseEvalSetItems } from "@/lib/evals/resume";
 import { parseEvalRequest } from "@/lib/validation";
 
 describe("parseEvalRequest", () => {
@@ -43,6 +43,42 @@ describe("parseEvalRequest", () => {
       expect(parsed.input.reviewerModel).toBe("reviewer-b");
       expect(parsed.input.items[0]?.hiddenCriteria).toBe("Name a shared framing failure.");
     }
+  });
+
+  it("reuses a saved eval set instead of creating a new one", () => {
+    const parsed = parseEvalRequest({
+      evalSetId: "00000000-0000-4000-8000-000000000111",
+      baselineLabel: "4-model depth-2",
+      models: ["model-a", "model-b"],
+      judgeModel: "judge-a",
+      reviewerModel: "reviewer-b",
+      debateDepth: 2,
+      researchEnabled: true,
+      name: "ignored",
+      items: [{ prompt: "ignored" }]
+    });
+    expect(parsed).toEqual({
+      kind: "reuse",
+      input: {
+        evalSetId: "00000000-0000-4000-8000-000000000111",
+        baselineLabel: "4-model depth-2",
+        models: ["model-a", "model-b"],
+        judgeModel: "judge-a",
+        reviewerModel: "reviewer-b",
+        debateDepth: 2,
+        researchEnabled: true
+      }
+    });
+  });
+
+  it("still treats evalRunId-only bodies as resume when a set id is also present", () => {
+    expect(parseEvalRequest({
+      evalRunId: "00000000-0000-4000-8000-000000000001",
+      evalSetId: "00000000-0000-4000-8000-000000000111"
+    })).toEqual({
+      kind: "resume",
+      evalRunId: "00000000-0000-4000-8000-000000000001"
+    });
   });
 });
 
@@ -110,6 +146,87 @@ describe("eval resume state", () => {
     expect(parseEvalSetItems([{ prompt: "Hello", hiddenCriteria: "  Hidden  " }])).toEqual([
       { prompt: "Hello", hiddenCriteria: "Hidden" }
     ]);
+  });
+
+  it("rebuilds eval input from a stored set and a new council config", () => {
+    const input = evalInputFromStoredSet({
+      id: "set-1",
+      name: "Quality",
+      description: "Private checks",
+      rubric: "Score carefully.",
+      hidden_criteria: "Must measure correlated failure.",
+      items: [{ prompt: "One" }, { prompt: "Two", hiddenCriteria: "Per-item" }]
+    }, {
+      models: ["model-a", "model-b"],
+      judgeModel: "judge-a",
+      reviewerModel: "reviewer-b",
+      debateDepth: 2,
+      researchEnabled: true,
+      baselineLabel: "deeper debate"
+    });
+
+    expect(input).toMatchObject({
+      evalSetId: "set-1",
+      name: "Quality",
+      hiddenCriteria: "Must measure correlated failure.",
+      models: ["model-a", "model-b"],
+      debateDepth: 2,
+      baselineLabel: "deeper debate",
+      items: [{ prompt: "One" }, { prompt: "Two", hiddenCriteria: "Per-item" }]
+    });
+  });
+});
+
+describe("createEvalRunRecords set reuse", () => {
+  it("does not insert a new eval set when evalSetId is present", async () => {
+    const { createEvalRunRecords } = await import("@/lib/evals/repository");
+    const inserted: string[] = [];
+    const admin = {
+      from(table: string) {
+        const query = {
+          insert() {
+            inserted.push(table);
+            return query;
+          },
+          select() {
+            return query;
+          },
+          eq() {
+            return query;
+          },
+          single: async () => ({ data: { id: "run-1" }, error: null }),
+          maybeSingle: async () => ({
+            data: {
+              id: "set-1",
+              name: "Quality",
+              description: null,
+              rubric: "Score carefully.",
+              hidden_criteria: "Must measure correlated failure.",
+              items: [{ prompt: "One" }]
+            },
+            error: null
+          })
+        };
+        return query;
+      }
+    };
+
+    await expect(createEvalRunRecords({
+      admin: admin as never,
+      userId: "user-a",
+      input: {
+        evalSetId: "set-1",
+        name: "Quality",
+        rubric: "Score carefully.",
+        items: [{ prompt: "One" }],
+        models: ["model-a"],
+        judgeModel: "judge-a",
+        debateDepth: 1,
+        researchEnabled: false,
+        baselineLabel: "rerun"
+      }
+    })).resolves.toBe("run-1");
+    expect(inserted).toEqual(["eval_runs"]);
   });
 });
 

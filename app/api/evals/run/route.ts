@@ -3,8 +3,10 @@ import { ApiError } from "@/lib/api-error";
 import { requireApiProfile } from "@/lib/auth";
 import { isCouncilAbortError } from "@/lib/council/abort";
 import type { EvalAbortReason } from "@/lib/evals/events";
-import { loadEvalRunForResume } from "@/lib/evals/repository";
+import { loadEvalRunForResume, loadEvalSetForUser } from "@/lib/evals/repository";
+import { evalInputFromStoredSet } from "@/lib/evals/resume";
 import { runEval } from "@/lib/evals/service";
+import type { EvalRunInput } from "@/lib/evals/types";
 import { createSupabaseAdminClient } from "@/lib/supabase/server";
 import { getErrorLog } from "@/lib/errors";
 import { logEvent, reportError } from "@/lib/observability";
@@ -40,18 +42,9 @@ export async function POST(request: Request) {
     const profile = await requireApiProfile();
     const parsed = parseEvalRequest(await parseJsonBody(request));
     const idempotencyKey = requireIdempotencyKey(request);
-    if (parsed.kind === "create") {
-      assertAllowedModels(evalModelIds(parsed.input));
-      assertResearchAvailable(parsed.input.researchEnabled);
-    } else {
-      const resume = await loadEvalRunForResume({
-        admin: createSupabaseAdminClient(),
-        userId: profile.id,
-        evalRunId: parsed.evalRunId
-      });
-      assertAllowedModels(evalModelIds(resume.input));
-      assertResearchAvailable(resume.input.researchEnabled);
-    }
+    const resolved = await resolveEvalRun(parsed, profile.id);
+    assertAllowedModels(evalModelIds(resolved.guard));
+    assertResearchAvailable(resolved.guard.researchEnabled);
     await enforceRateLimit({
       scope: "eval-run",
       key: profile.id,
@@ -138,8 +131,8 @@ export async function POST(request: Request) {
 
         runEval({
           profile,
-          input: parsed.kind === "create" ? parsed.input : undefined,
-          resumeEvalRunId: parsed.kind === "resume" ? parsed.evalRunId : undefined,
+          input: resolved.input,
+          resumeEvalRunId: resolved.resumeEvalRunId,
           signal: runAbortController.signal,
           abortReason: () => abortReason,
           onEvent: async (event) => {
@@ -234,4 +227,36 @@ export async function POST(request: Request) {
     response.headers.set("X-Request-Id", requestId);
     return response;
   }
+}
+
+async function resolveEvalRun(
+  parsed: ReturnType<typeof parseEvalRequest>,
+  userId: string
+): Promise<{
+  input?: EvalRunInput;
+  resumeEvalRunId?: string;
+  guard: Pick<EvalRunInput, "models" | "judgeModel" | "reviewerModel" | "researchEnabled">;
+}> {
+  const admin = createSupabaseAdminClient();
+  if (parsed.kind === "resume") {
+    const resume = await loadEvalRunForResume({
+      admin,
+      userId,
+      evalRunId: parsed.evalRunId
+    });
+    return {
+      resumeEvalRunId: parsed.evalRunId,
+      guard: resume.input
+    };
+  }
+  if (parsed.kind === "reuse") {
+    const set = await loadEvalSetForUser({
+      admin,
+      userId,
+      evalSetId: parsed.input.evalSetId
+    });
+    const input = evalInputFromStoredSet(set, parsed.input);
+    return { input, guard: input };
+  }
+  return { input: parsed.input, guard: parsed.input };
 }

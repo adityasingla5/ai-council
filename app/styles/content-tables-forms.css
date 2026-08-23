@@ -769,3 +769,26 @@ details.trace summary > span:first-child {
   color: var(--ink);
 }
 
+.eval-compare {
+  gap: 12px;
+}
+
+.eval-compare-metrics {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(220px, 1fr));
+  gap: 12px;
+}
+
+.eval-delta.better {
+  color: var(--green);
+}
+
+.eval-delta.worse,
+.eval-metric.eval-delta.worse dd {
+  color: var(--amber);
+}
+
+.eval-metric.eval-delta.better dd {
+  color: var(--green);
+}
+

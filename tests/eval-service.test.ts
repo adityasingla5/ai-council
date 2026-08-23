@@ -91,6 +91,18 @@ describe("eval service orchestration", () => {
     expect(dependencies.markComplete).not.toHaveBeenCalled();
   });
 
+  it("passes a saved eval set id through to run creation", async () => {
+    const dependencies = createDependencies();
+    await runEval({
+      profile,
+      input: { ...input, evalSetId: "00000000-0000-4000-8000-000000000099" }
+    }, dependencies);
+
+    expect(dependencies.createRunRecords).toHaveBeenCalledWith(expect.objectContaining({
+      input: expect.objectContaining({ evalSetId: "00000000-0000-4000-8000-000000000099" })
+    }));
+  });
+
   it("resumes from scored items instead of rerunning them", async () => {
     const dependencies = createDependencies();
     vi.mocked(dependencies.loadResume).mockResolvedValue({

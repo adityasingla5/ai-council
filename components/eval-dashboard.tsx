@@ -1,7 +1,7 @@
 "use client";
 
 import { useDeferredValue, useEffect, useMemo, useRef, useState } from "react";
-import { Beaker, ChevronDown, ChevronRight, Play, Search, Square } from "lucide-react";
+import { Beaker, ChevronDown, ChevronRight, Play, RotateCcw, Search, Square } from "lucide-react";
 import {
   aggregateFailureMetrics,
   canResumeEval,
@@ -14,6 +14,7 @@ import {
   itemFailureMetrics,
   type EvalMetric
 } from "@/components/eval-dashboard/eval-status";
+import { EvalComparePanel } from "@/components/eval-dashboard/eval-compare";
 import {
   applyEvalEvent,
   emptyLiveEvalState,
@@ -29,7 +30,9 @@ import {
   type ItemCorrelatedFailure,
   type MemberHeldOutScore
 } from "@/lib/evals/correlation";
+import { formatEvalConfigLabel } from "@/lib/evals/compare";
 import type { EvalEvent } from "@/lib/evals/events";
+import { parseEvalSetItems, type StoredEvalSetRecord } from "@/lib/evals/resume";
 import { compactText } from "@/lib/format";
 import { MAX_COUNCIL_DEBATE_ROUNDS } from "@/lib/limits";
 import type { ModelOption } from "@/lib/types";
@@ -49,6 +52,7 @@ type EvalScore = {
 
 type EvalRun = {
   id: string;
+  eval_set_id?: string | null;
   status: string;
   aggregate_score: number | null;
   created_at: string;
@@ -76,6 +80,8 @@ type Notice = { kind: "error" | "status" | "success"; text: string };
 export function EvalDashboard() {
   const [models, setModels] = useState<ModelOption[]>([]);
   const [evals, setEvals] = useState<EvalRun[]>([]);
+  const [sets, setSets] = useState<StoredEvalSetRecord[]>([]);
+  const [selectedSetId, setSelectedSetId] = useState("");
   const [name, setName] = useState("Private quality check");
   const [description, setDescription] = useState("");
   const [baselineLabel, setBaselineLabel] = useState("");
@@ -112,7 +118,7 @@ export function EvalDashboard() {
     setLoading(true);
     void Promise.all([
       requestJson<{ models: ModelOption[]; researchAvailable?: boolean }>("/api/models", { signal: controller.signal }),
-      requestJson<{ evals: EvalRun[] }>("/api/evals", { signal: controller.signal })
+      requestJson<{ evals: EvalRun[]; sets?: StoredEvalSetRecord[] }>("/api/evals", { signal: controller.signal })
     ])
       .then(([modelsBody, evalsBody]) => {
         setModels(modelsBody.models);
@@ -123,6 +129,7 @@ export function EvalDashboard() {
         setJudgeModel((current) => current || modelsBody.models[0]?.id || "");
         setReviewerModel((current) => current || modelsBody.models[1]?.id || modelsBody.models[0]?.id || "");
         setEvals(evalsBody.evals);
+        setSets(evalsBody.sets ?? []);
       })
       .catch((loadError: unknown) => {
         if (loadError instanceof Error && loadError.name === "AbortError") return;
@@ -157,19 +164,64 @@ export function EvalDashboard() {
       return;
     }
 
-    await startEval({
-      name,
-      description: description.trim() || undefined,
+    const council = {
       baselineLabel: baselineLabel.trim() || undefined,
-      rubric,
-      hiddenCriteria: hiddenCriteria.trim() || undefined,
-      items: prompts,
       models: selectedModels,
       judgeModel,
       reviewerModel: reviewerModel || undefined,
       debateDepth,
       researchEnabled: researchEnabled && researchAvailable
+    };
+
+    if (selectedSetId) {
+      await startEval({
+        evalSetId: selectedSetId,
+        ...council
+      });
+      return;
+    }
+
+    await startEval({
+      name,
+      description: description.trim() || undefined,
+      rubric,
+      hiddenCriteria: hiddenCriteria.trim() || undefined,
+      items: prompts,
+      ...council
     });
+  }
+
+  function applySet(set: StoredEvalSetRecord) {
+    setSelectedSetId(set.id);
+    setName(set.name);
+    setDescription(set.description ?? "");
+    setRubric(set.rubric);
+    setHiddenCriteria(set.hidden_criteria ?? "");
+    setItems(parseEvalSetItems(set.items).map((item) => item.prompt).join("\n"));
+  }
+
+  function prepareRerun(evalRun: EvalRun) {
+    const set = sets.find((item) => item.id === evalRun.eval_set_id);
+    if (set) {
+      applySet(set);
+    } else if (evalRun.eval_set_id && evalRun.eval_sets) {
+      applySet({
+        id: evalRun.eval_set_id,
+        name: evalRun.eval_sets.name ?? "Eval set",
+        description: evalRun.eval_sets.description ?? null,
+        rubric: evalRun.eval_sets.rubric ?? rubric,
+        hidden_criteria: evalRun.eval_sets.hidden_criteria ?? null,
+        items: evalRun.eval_sets.items ?? []
+      });
+    }
+    const config = evalRun.council_config;
+    if (config?.models?.length) setSelectedModels(config.models);
+    if (config?.judgeModel) setJudgeModel(config.judgeModel);
+    if (config?.reviewerModel) setReviewerModel(config.reviewerModel);
+    if (config?.debateDepth) setDebateDepth(config.debateDepth);
+    if (typeof config?.researchEnabled === "boolean") setResearchEnabled(config.researchEnabled);
+    setBaselineLabel("");
+    document.getElementById("eval-setup")?.scrollIntoView({ behavior: "smooth", block: "start" });
   }
 
   function stopEval() {
@@ -231,18 +283,45 @@ export function EvalDashboard() {
 
   return (
     <div className="stack">
-      <form className="panel stack" onSubmit={runEval}>
+      <form className="panel stack" id="eval-setup" onSubmit={runEval}>
         <div className="section-title">
           <h2>Compare council configurations</h2>
           <Beaker size={16} />
         </div>
         <p className="muted small">
-          Run the same prompts against a council configuration and score the published answers with a rubric. Members&apos; independent first-pass answers are scored separately against held-out criteria the council never sees, by an adversarial reviewer that does not see debate or peer reasoning. The dashboard reports correlated failure — shared misses on the same checks — separately from answer agreement. Stop a long run to keep scored prompts, then resume the rest.
+          Run the same saved prompt set against different council configurations. Members&apos; independent first-pass answers are scored against held-out criteria the council never sees. The dashboard reports correlated failure separately from answer agreement, then lets you compare two labeled runs of the same set.
         </p>
         <div className="form-row">
           <label className="field">
+            <span>Eval set</span>
+            <select
+              disabled={running}
+              value={selectedSetId}
+              onChange={(event) => {
+                const nextId = event.target.value;
+                if (!nextId) {
+                  setSelectedSetId("");
+                  return;
+                }
+                const set = sets.find((item) => item.id === nextId);
+                if (set) applySet(set);
+              }}
+            >
+              <option value="">New set</option>
+              {sets.map((set) => (
+                <option key={set.id} value={set.id}>
+                  {set.name} · {parseEvalSetItems(set.items).length} prompts
+                </option>
+              ))}
+            </select>
+          </label>
+          <label className="field">
             <span>Name</span>
-            <input value={name} onChange={(event) => setName(event.target.value)} />
+            <input
+              readOnly={Boolean(selectedSetId)}
+              value={name}
+              onChange={(event) => setName(event.target.value)}
+            />
           </label>
           <label className="field">
             <span>Baseline label</span>
@@ -253,6 +332,11 @@ export function EvalDashboard() {
             />
           </label>
         </div>
+        {selectedSetId ? (
+          <p className="muted small">
+            Prompts, rubric, and held-out criteria stay fixed so the new run is comparable. Change the council, reviewer, or baseline label.
+          </p>
+        ) : null}
         <div className="form-row">
           <label className="field">
             <span>Judge model</span>
@@ -291,6 +375,7 @@ export function EvalDashboard() {
         <label className="field">
           <span>Description</span>
           <input
+            readOnly={Boolean(selectedSetId)}
             value={description}
             onChange={(event) => setDescription(event.target.value)}
             placeholder="Optional notes about this configuration"
@@ -298,11 +383,16 @@ export function EvalDashboard() {
         </label>
         <label className="field">
           <span>Rubric</span>
-          <textarea value={rubric} onChange={(event) => setRubric(event.target.value)} />
+          <textarea
+            readOnly={Boolean(selectedSetId)}
+            value={rubric}
+            onChange={(event) => setRubric(event.target.value)}
+          />
         </label>
         <label className="field">
           <span>Held-out acceptance criteria</span>
           <textarea
+            readOnly={Boolean(selectedSetId)}
             value={hiddenCriteria}
             onChange={(event) => setHiddenCriteria(event.target.value)}
             placeholder="Optional checks the council never sees. Prefer constraints the prompt does not already imply — required evidence, disallowed assumptions, or a different success definition."
@@ -313,7 +403,11 @@ export function EvalDashboard() {
         </p>
         <label className="field">
           <span>Prompts, one per line</span>
-          <textarea value={items} onChange={(event) => setItems(event.target.value)} />
+          <textarea
+            readOnly={Boolean(selectedSetId)}
+            value={items}
+            onChange={(event) => setItems(event.target.value)}
+          />
         </label>
         <label className="switch-row">
           <input
@@ -360,7 +454,7 @@ export function EvalDashboard() {
         <div className="eval-run-actions">
           <button className="button primary" disabled={running || selectedModels.length === 0} type="submit">
             <Play size={16} />
-            {running ? "Running" : "Run eval"}
+            {running ? "Running" : selectedSetId ? "Rerun set" : "Run eval"}
           </button>
           {running ? (
             <button
@@ -410,6 +504,8 @@ export function EvalDashboard() {
         ) : null}
       </form>
 
+      <EvalComparePanel disabled={running} runs={evals} />
+
       <section className="panel">
         <h2>Recent evals</h2>
         {loading ? <p className="muted small" role="status">Loading evals.</p> : null}
@@ -436,12 +532,7 @@ export function EvalDashboard() {
                   const total = evalItemCount(evalRun.eval_sets?.items);
                   const resumable = !running && canResumeEval(evalRun.status, scored, total);
                   const runMetrics = parseAggregateCorrelatedFailure(evalRun.correlated_failure);
-                  const configLabel = [
-                    config?.models?.length ? `${config.models.length} models` : null,
-                    config?.debateDepth != null ? `depth ${config.debateDepth}` : null,
-                    config?.reviewerModel && config.reviewerModel !== config.judgeModel ? "held-out reviewer" : null,
-                    config?.researchEnabled ? "research" : null
-                  ].filter(Boolean).join(" · ") || "—";
+                  const configLabel = formatEvalConfigLabel(config);
                   const scores = [...(evalRun.eval_scores ?? [])].sort(
                     (left, right) => (left.item_index ?? 0) - (right.item_index ?? 0)
                   );
@@ -489,15 +580,28 @@ export function EvalDashboard() {
                               <p className="muted small"><strong>Adversarial reviewer:</strong> {config.reviewerModel}</p>
                             ) : null}
                             {runMetrics ? <MetricGrid metrics={aggregateFailureMetrics(runMetrics)} /> : null}
-                            {resumable ? (
-                              <button
-                                className="button subtle small"
-                                type="button"
-                                onClick={() => void startEval({ evalRunId: evalRun.id })}
-                              >
-                                Resume remaining prompts
-                              </button>
-                            ) : null}
+                            <div className="eval-run-actions">
+                              {evalRun.eval_set_id ? (
+                                <button
+                                  className="button subtle small"
+                                  type="button"
+                                  disabled={running}
+                                  onClick={() => prepareRerun(evalRun)}
+                                >
+                                  <RotateCcw size={14} />
+                                  Rerun this set
+                                </button>
+                              ) : null}
+                              {resumable ? (
+                                <button
+                                  className="button subtle small"
+                                  type="button"
+                                  onClick={() => void startEval({ evalRunId: evalRun.id })}
+                                >
+                                  Resume remaining prompts
+                                </button>
+                              ) : null}
+                            </div>
                             {scores.length ? (
                               <ul className="eval-score-list">
                                 {scores.map((score, index) => (
